@@ -403,6 +403,8 @@ async def on_startup(bot: Bot):
 async def on_shutdown(bot: Bot):
     if WEBHOOK_HOST:
         await bot.delete_webhook()
+    # Закрываем сессию бота, чтобы aiohttp не выдавал ошибку Unclosed client session
+    await bot.session.close()
 
 def main():
     logging.basicConfig(level=logging.INFO)
