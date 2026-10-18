@@ -164,6 +164,16 @@ def get_admin_keyboard():
 
 # --- ОБРАБОТЧИКИ БИЗНЕС-ЧАТОВ ---
 
+@router.message(Command("start"))
+async def cmd_start(message: Message):
+    await message.answer(
+        f"👋 Привет, {message.from_user.full_name}!\n\n"
+        "Этот бот работает в режиме Telegram Business.\n"
+        "Подключите его в настройках своего аккаунта Telegram (Telegram Business -> Чат-боты), "
+        "чтобы он мог отвечать на команды `.buy` и `.help` в ваших чатах.\n\n"
+        "Для владельца бота доступна команда /admin."
+    )
+
 @router.message(F.text == ".help")
 async def show_help(message: Message):
     e_doc = await get_emoji_text("help_doc")
