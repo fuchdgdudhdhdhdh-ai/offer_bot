@@ -141,7 +141,7 @@ async def process_buy_command(message: Message):
         f"Пользователь <b>{giver_username}</b> предлагает\n"
         f"Вам <b>{amount}</b> {star_emoji} за подарок\n"
         f"<b>{nft_name}</b>.\n\n"
-        f"Предложение действует ещё 6ч."
+        f"Предложение действует ещё 24ч."
     )
     
     # Отправляем сообщение-оффер
